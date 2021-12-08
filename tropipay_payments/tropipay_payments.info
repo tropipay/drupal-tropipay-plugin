@@ -1,0 +1,19 @@
+name = Tropipay Payments
+description = Provides a payment method using Tropipay
+package = Tropipay
+
+; Dependencies
+dependencies[] = commerce
+dependencies[] = commerce_payment
+
+core = 7.x
+version = 7.x-1.0
+project = tropipaypayments
+
+files[] = tropipay_payments.module
+
+; Information added by Drupal.org packaging script on 2020-05-20
+version = "7.x-1.3"
+core = "7.x"
+project = "tropipay_payments"
+datestamp = "1589938212"

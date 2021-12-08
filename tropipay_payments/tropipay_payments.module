@@ -1,0 +1,671 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function tropipay_payments_menu() {
+  $items = array();
+  // Define an always accessible path to receive IPNs.
+  $items['tropipay_payments/notify'] = array(
+    'page callback' => 'tropipay_payments_process_notify',
+    'page arguments' => array(),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Returns the IPN URL.
+ *
+ * @param $method_id
+ *   Optionally specify a payment method ID to include in the URL.
+ */
+function tropipay_payments_notify_url() {
+  $parts = array(
+    'tropipay_payments',
+    'notify',
+  );
+
+  return url(implode('/', $parts), array('absolute' => TRUE));
+}
+
+function tropipay_payments_clave($settings)
+{
+	if ($settings['server_tropipay'] == 'sandbox')
+		return $settings['Clave_pruebas_tropipay'];
+	return utf8_decode($settings['Clave_tropipay']);
+}
+
+
+function tropipay_payments_isJson($string) {
+  return ((is_string($string) &&
+          (is_object(json_decode($string)) ||
+          is_array(json_decode($string))))) ? true : false;
+}
+
+/**
+ * Processes an incoming IPN.
+ *
+ * @param $payment_method
+ *   The payment method instance array that originally made the payment.
+ * @param $debug_ipn
+ *   Optionally specify an IPN array for debug purposes; if left empty, the IPN
+ *     be pulled from the $_POST. If an IPN is passed in, validation of the IPN
+ *     at Redsýs will be bypassed.
+ *
+ * @return
+ *   TRUE or FALSE indicating whether the IPN was successfully processed or not.
+ */
+function tropipay_payments_process_notify() {
+  $payment_method = commerce_payment_method_instance_load('tropipay|commerce_payment_tropipay');
+  $settings=$payment_method['settings'];
+
+  $strrrr=file_get_contents('php://input');
+  $ppd=json_decode($strrrr,true);
+
+  /*$salida="";
+  //$salida .= $strrrr;
+  //$salida .= $ppd;
+  foreach($ppd as $key=>$value) {
+    $salida.=$key . ": ";
+    if(is_array($value)) {
+      foreach($value as $key2=>$value2) {
+        $salida.= "\n\r     " . $key2 . ": " . $value2;
+      }
+    }
+    else {
+      $salida.=$value . "\n\r";
+    }
+  }
+  $txt_name = 'respuesta.txt'; // xml,pdf,doc etc as you needed
+  $file = file_unmanaged_save_data($salida,'public://' .$txt_name);*/
+
+
+    $ds_amount = $ppd["data"]["originalCurrencyAmount"];
+    $ds_order = $ppd["data"]["reference"];
+    $ds_bankordercode = $ppd["data"]["bankOrderCode"];
+    //$ds_amount = $ppd["data"]["originalCurrencyAmount"];
+    $ds_merchant_usermail = $settings['Mailuser_tropipay'];
+    $ds_merchant_userpassword = $settings['Password_tropipay'];
+    $ds_reference=$ppd["data"]["reference"];
+    $ds_currency = $ppd["data"]["currency"];
+
+
+
+    $firma_remota = $ppd["data"]["signature"];
+
+    $firma_local=hash('sha256', $ds_bankordercode . $ds_merchant_usermail . sha1($ds_merchant_userpassword) . $ds_amount);
+
+    if($firma_local==$firma_remota) {
+      $order_id = tropipay_payments_get_order_id($ds_reference);
+      if ($order_id) {
+        $order = commerce_order_load($order_id);
+      }
+      else {
+          return FALSE;
+      }
+
+      $transaction = commerce_payment_transaction_new('tropipay', $order->order_id);
+      $transaction->instance_id = $payment_method['instance_id'];
+      $transaction->remote_id = $ds_bankordercode;
+      $transaction->amount = commerce_currency_decimal_to_amount($ds_amount/100, $ds_currency);
+      $transaction->currency_code = $ds_currency;
+      $transaction->payload[REQUEST_TIME] = $ppd;
+      $ret=FALSE;
+      if($ppd["status"]=="OK") {
+        $transaction->remote_status = 'OK';
+        $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+        $transaction->message = t('Pago completado con éxito.');
+        $ret=TRUE;
+      }
+      else {
+        $transaction->remote_status = 'KO';
+		    $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+	    	$transaction->message = t("El pago ha fallado. Error:");
+      }
+      commerce_payment_transaction_save($transaction);
+      if($ret) {
+        commerce_payment_redirect_pane_next_page($order);
+      }
+      else {
+        commerce_payment_redirect_pane_previous_page($order);
+      }
+    }
+
+	return $ret;
+}
+
+/**
+ * Returns a unique invoice number based on the Order ID and timestamp.
+ */
+function tropipay_payments_num_operacion($order) {
+  return str_pad($order->order_id, 8, "0", STR_PAD_LEFT).date('is');
+}
+
+function tropipay_payments_get_order_id($num) {
+  return intval(substr($num,0,-4));
+}
+
+/**
+ * Returns an array of Redsýs payment method icon img elements.
+ *
+ * @return
+ *   The array of themed payment method icons keyed by name: visa, mastercard,
+ *   amex, discover, echeck, redsys
+ */
+function tropipay_payments_icons() {
+  $icons = array();
+
+  $payment_methods = array(
+    /*'visa' => t('Visa'),
+    'mastercard' => t('Mastercard'),*/
+    'tropipay' => t('tropipay'),
+  );
+
+  foreach ($payment_methods as $name => $title) {
+    $variables = array(
+      //'path' => drupal_get_path('module', 'commerce_redsys') . '/images/' . $name . '.gif',
+	'path' => drupal_get_path('module', 'tropipay_payments') . '/images/tropipay-logos.png',
+      'title' => $title,
+      'alt' => $title,
+      'attributes' => array(
+        'class' => array('tropipay-payments-icon'),
+      ),
+    );
+    $icons[$name] = theme('image', $variables);
+  }
+
+  return $icons;
+}
+
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function tropipay_payments_commerce_payment_method_info() {
+  $payment_methods = array();
+
+  $icons = tropipay_payments_icons();
+  $display_title = t('!logo Tarjeta de cédito o débito (vía Tropipay)', array('!logo' => $icons['tropipay']));
+  //$display_title .= '<div class="commerce-redsys-icons"><span class="label">' . t('Includes:') . '</span>' . implode(' ', $icons) . '</div>';
+
+  $payment_methods['tropipay'] = array(
+    'base' => 'tropipay_payments',
+    'title' => t('Tarjeta de crédido o débito (vía Tropipay)'),
+    'short_title' => t('Tropipay'),
+    'display_title' => $display_title,
+    'description' => t('Tropipay Website Payments Standard'),
+    'terminal' => TRUE,
+    'offsite' => TRUE,
+    'offsite_autoredirect' => TRUE,
+  );
+
+
+  return $payment_methods;
+}
+
+/**
+ * Returns the default settings for the Redsýs payment method.
+ */
+function tropipay_payments_default_settings() {
+  $default_currency = variable_get('commerce_default_currency', 'EUR');
+
+  return array(
+    'Merchant_tropipay' => '999008881',
+    'Terminal_tropipay' => '1',
+    'Clave_tropipay' => '111111111111111',
+    'Clave_pruebas_tropipay' => 'sq7HjrUOBfKmC576ILgskD5srU870gJ7',
+    'currency_code_tropipay' => in_array($default_currency, array_keys(tropipay_payments_currencies())) ? $default_currency : 'EUR',
+    'allow_supported_currencies_tropipay' => FALSE,
+    'server_tropipay' => 'sandbox',
+    'MerchantName_tropipay' => variable_get('site_name', 'Drupal'),
+    'Mailuser_tropipay' => 'user@email.com',
+    'Password_tropipay' => ''
+  );
+}
+
+/**
+ * Payment method callback: settings form.
+ */
+function tropipay_payments_settings_form($settings = array()) {
+  $form = array();
+
+  // Merge default settings into the stored settings array.
+  $settings = (array) $settings + tropipay_payments_default_settings();
+
+  $form['Mailuser_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Email in tropipay'),
+    '#description' => t('Your email registered in tropipay'),
+    '#default_value' => $settings['Mailuser_tropipay'],
+    '#required' => TRUE,
+  );
+  $form['Password_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Your password in tropipay'),
+    '#description' => t('Your password registered in tropipay'),
+    '#default_value' => $settings['Password_tropipay'],
+    '#required' => TRUE,
+  );
+  /*$form['MerchantName_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Nomre del comercio'),
+    '#description' => t('Texto que se mostrará en la pantalla de solicitud de número de tarjeta que indique al cliento a que comercio está haciendo el pago.'),
+    '#default_value' => $settings['MerchantName_tropipay'],
+    '#required' => TRUE,
+  );
+
+  $form['Merchant_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Código de comercio (FUC)'),
+    '#description' => t('Código entregado por tropipay'),
+    '#default_value' => $settings['Merchant_tropipay'],
+    '#required' => TRUE,
+  );
+  $form['MerchantName_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Nomre del comercio'),
+    '#description' => t('Texto que se mostrará en la pantalla de solicitud de número de tarjeta que indique al cliento a que comercio está haciendo el pago.'),
+    '#default_value' => $settings['MerchantName_tropipay'],
+    '#required' => TRUE,
+  );
+  $form['Terminal_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Terminal'),
+    '#description' => t('Código entregado por Tropipay'),
+    '#default_value' => $settings['Terminal_tropipay'],
+    '#required' => TRUE,
+  );
+  $form['Clave_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Clave'),
+    '#description' => t('Código entregado por Tropipay'),
+    '#default_value' => $settings['Clave_tropipay'],
+    '#required' => TRUE,
+  );
+  $form['Clave_pruebas_tropipay'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Clave (Pruebas)'),
+    '#description' => t('Código entregado por Tropipay'),
+    '#default_value' => $settings['Clave_pruebas_tropipay'],
+    '#required' => TRUE,
+  );*/
+  $form['currency_code_tropipay'] = array(
+    '#type' => 'select',
+    '#title' => t('Moneda por defecto'),
+    '#description' => t('Las transacciones en otras monedas se convertirán a esta , si es un sitio multimoneda tendrá que configurar los tipo de conversión entre monedas.'),
+    '#options' => tropipay_payments_currencies(),
+    '#default_value' => $settings['currency_code_tropipay'],
+  );
+  /*$form['allow_supported_currencies_tropipay'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Permitir el uso del resto de monedas de la lista.'),
+    '#description' => t('Si la transacción esta en una de las monedas listas procesará directamente en esa moneda. IMPORTANTE: Su tpv virtual en Tropipay tienes que admitir los pagos en estas monedas. Si la moneda de la transacción no es ninguna de la lista se convertirá a la moneda por defecto.'),
+    '#default_value' => $settings['allow_supported_currencies_tropipay'],
+  );*/
+  $form['server_tropipay'] = array(
+    '#type' => 'radios',
+    '#title' => t('Entorno Tropipay'),
+    '#options' => array(
+      'sandbox' => ('Pruebas'),
+      'live' => ('Real'),
+    ),
+    '#default_value' => $settings['server_tropipay'],
+  );
+
+  return $form;
+}
+
+/**
+ * Payment method callback: adds a message and CSS to the submission form if
+ * enabled in the payment method settings.
+ */
+function tropipay_payments_submit_form($payment_method, $pane_values, $checkout_pane, $order) {
+  $form = array();
+
+  if (!empty($payment_method['settings']['show_payment_instructions'])) {
+    $form['tropipay_information'] = array(
+      '#markup' => '<span class="tropipay-payments-wps-info">' . t('(Continue with checkout to complete payment via Tropipay.)') . '</span>',
+    );
+  }
+  //dsm($checkout_pane);
+  if(empty($checkout_pane)) {
+    $form= tropipay_payments_redirect_form($form, $form_state, $order, $payment_method);
+    //return commerce_redsys_redirect_form($form, $form_state, $order, $payment_method);
+    $sett=$payment_method["settings"];
+    $form['#action'] = tropipay_payments_server_url('live');
+    $form['submit'] = array(
+      '#type' => 'submit',
+      '#value' => t('Pagar con tarjeta en Tropipay'),
+    );
+    //dsm($form);
+    return $form;
+    //return commerce_redsys_order_form($form, $form_state, $order, array());
+  }
+
+  return $form;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function tropipay_payments_form_commerce_checkout_form_alter(&$form, &$form_state) {
+  // If this checkout form contains the payment method radios...
+  if (!empty($form['commerce_payment']['payment_method']['#options'])) {
+    // Loop over its options array looking for a Redsýs option.
+    foreach (array_keys($form['commerce_payment']['payment_method']['#options']) as $key) {
+      list($method_id, $rule_name) = explode('|', $key);
+
+      // If we find Redsýs, include its CSS on the form and exit the loop.
+      if ($method_id == 'tropipay') {
+        $form['commerce_payment']['payment_method']['#attached']['css'][] = drupal_get_path('module', 'tropipay_payments') . '/theme/commerce_tropipay.theme.css';
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Payment method callback: redirect form, a wrapper around the module's general
+ *   use function for building a WPS form.
+ */
+function tropipay_payments_redirect_form($form, &$form_state, $order, $payment_method) {
+  // Return an error if the enabling action's settings haven't been configured.
+  if (empty($payment_method['settings']['Mailuser_tropipay']) || empty($payment_method['settings']['Password_tropipay'])) {
+    drupal_set_message(t('Tropipay is not configured for use. No Tropipay Merchant has been specified.'), 'error');
+    return array();
+  }
+
+  $settings = array(
+    // Return to the previous page when payment is canceled
+    'cancel_url' => url('checkout/' . $order->order_id . '/payment/back/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+
+    // Return to the payment redirect page for processing successful payments
+    'return_url' => url('checkout/' . $order->order_id . '/payment/return/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+
+    // Specify the current payment method instance ID in the notify_url
+    'payment_method' => $payment_method['instance_id'],
+  );
+
+  return tropipay_payments_order_form($form, $form_state, $order, $payment_method['settings'] + $settings);
+}
+
+/**
+ * Payment method callback: redirect form return validation.
+ */
+function tropipay_payments_redirect_form_validate($order, $payment_method) {
+  // This may be an unnecessary step, but if for some reason the user does end
+  // up returning at the success URL with a Failed payment, go back.
+  if (!empty($_POST['payment_status']) && $_POST['payment_status'] == 'Failed') {
+    return FALSE;
+  }
+}
+
+function tropipay_payments_getLanguange() {
+	return '001';
+}
+
+/**
+ * Builds a Website Payments Standard form from an order object.
+ *
+ * @param $order
+ *   The fully loaded order being paid for.
+ * @param $settings
+ *   An array of settings used to build out the form, including:
+ *   - server: which server to use, either sandbox or live
+ *   - Merchant: the Redsýs e-mail address the payment submits to
+ *   - cancel_url: the URL Redsýs should send the user to on cancellation
+ *   - return: the URL Redsýs should send the user to on successful payment
+ *   - currency_code: the Redsýs currency code to use for this payment if the
+ *     total for the order is in a non-Redsýs supported currency
+ *   - language: the Redsýs language code to use on the payment form
+ *   - payment_action: the Redsýs payment action to use: sale, authorization,
+ *     or order
+ *   - payment_method: optionally the name of the Commerce payment method to
+ *     include in the IPN notify_url
+ *
+ * @return
+ *   A renderable form array.
+ */
+function tropipay_payments_order_form($form, &$form_state, $order, $settings) {
+  $wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // Determine the currency code to use to actually process the transaction,
+  // which will either be the default currency code or the currency code of the
+  // order if it's supported by Redsýs if that option is enabled.
+  $currency_code = $settings['currency_code_tropipay'];
+  $order_currency_code = $wrapper->commerce_order_total->currency_code->value();
+
+  if (!empty($settings['allow_supported_currencies_tropipay']) && in_array($order_currency_code, array_keys(tropipay_payments_currencies()))) {
+    $currency_code = $order_currency_code;
+  }
+
+  //dsm($form_state);
+  //dsm($order);
+  $amount = $wrapper->commerce_order_total->amount->value();
+
+  // Ensure a default value for the payment_method setting.
+  $settings += array('payment_method' => '');
+  $ds_merchant_currency = '978';
+  if($currency_code == 'USD') $ds_merchant_currency = '840';
+  if($currency_code == 'GBP') $ds_merchant_currency = '826';
+  if($currency_code == 'JPY') $ds_merchant_currency = '392';
+  if($currency_code == 'CNY') $ds_merchant_currency = '156';
+
+  $ds_merchant_consumerlanguage = tropipay_payments_getLanguange();
+
+
+
+  $ds_merchant_amount = (int) (commerce_currency_amount_to_decimal(commerce_currency_convert($amount, $order_currency_code, $currency_code), $currency_code)*100);
+   //$ds_merchant_amount =$default;
+
+  //$ds_merchant_code = $settings['Merchant_tropipay'];
+  //$ds_merchant_terminal = $settings['Terminal_tropipay'];
+  $ds_merchant_merchanturl = tropipay_payments_notify_url();
+  $ds_merchant_urlok = $settings['return_url'];
+  $ds_merchant_urlko = $settings['cancel_url'];
+  $ds_merchant_order = tropipay_payments_num_operacion($order);
+  $ds_merchant_data = $order->order_id;
+  $ds_merchant_transactiontype = 0;
+
+  $ds_merchant_productdescription = '';
+  $ds_merchant_titular = '';
+
+
+  $ds_merchant_usermail = $settings['Mailuser_tropipay'];
+  $ds_merchant_userpassword = $settings['Password_tropipay'];
+
+  $data1 = array("email" => $ds_merchant_usermail, "password" => $ds_merchant_userpassword);
+  $data_string = json_encode($data1);
+
+  $tropipay_server=tropipay_payments_server_url($settings['server_tropipay']);
+
+  $curl = curl_init();
+  curl_setopt_array($curl, array(
+    CURLOPT_URL => $tropipay_server . "/api/access/login",
+    //CURLOPT_HTTPHEADER => array ('Content-Type: application/json','Content-Length: ' . strlen($data_string)),
+    CURLOPT_HTTPHEADER => array ('Content-Type: application/json'),
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_ENCODING => "",
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_TIMEOUT => 10,
+    CURLOPT_CUSTOMREQUEST => "POST",
+    CURLOPT_POSTFIELDS => "{\"email\":\"" . $ds_merchant_usermail ."\",\"password\":\"" . $ds_merchant_userpassword . "\"}",
+  ));
+
+  $response = curl_exec($curl);
+  $err = curl_error($curl);
+
+  curl_close($curl);
+
+  if ($err) {
+    echo "cURL Error #:" . $err;
+  } else {
+    //echo $response;
+    $character = json_decode($response);
+    $tokent=$character->token;
+
+    $datetime = new DateTime('tomorrow');
+    //echo $datetime->format('Y-m-d');
+
+    $customerprofiled=commerce_customer_profile_load($order->commerce_customer_billing['und'][0]['profile_id']);
+
+    $arraycliente["name"]=$customerprofiled->commerce_customer_address['und'][0]['name_line'];
+    $arraycliente["lastName"]=$customerprofiled->commerce_customer_address['und'][0]['name_line'];
+    $arraycliente["address"]=$customerprofiled->commerce_customer_address['und'][0]['thoroughfare'] . ", " . $customerprofiled->commerce_customer_address['und'][0]['locality'] . ", " . $customerprofiled->commerce_customer_address['und'][0]['postal_code'];
+    $arraycliente["phone"]="+34616161611";
+    $arraycliente["email"]=$order->mail;
+    $arraycliente["countryId"] = 1;
+    $arraycliente["termsAndConditions"] = true;
+
+    $datos=array(
+      "reference" => $ds_merchant_order,
+      "concept" => t('Order #: ') . $order->order_id,
+      "description" => " ",
+      "amount" => $ds_merchant_amount,
+      "currency" => $settings['currency_code_tropipay'],
+      "singleUse" => true,
+      "reasonId" => 4,
+      "expirationDays" => 1,
+      "lang" => "es",
+      "urlSuccess" => $ds_merchant_urlok,
+      "urlFailed" => $ds_merchant_urlko,
+      "urlNotification" => $ds_merchant_merchanturl,
+      "client" => null,
+      "serviceDate" => $datetime->format('Y-m-d'),
+      "directPayment" => true,
+      "client" => $arraycliente
+    );
+
+    $data_string2 = json_encode($datos);
+
+
+
+    $curl = curl_init();
+    curl_setopt_array($curl, array(
+      CURLOPT_URL => $tropipay_server . "/api/paymentcards",
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_ENCODING => "",
+      CURLOPT_MAXREDIRS => 10,
+      CURLOPT_TIMEOUT => 30,
+      CURLOPT_CUSTOMREQUEST => "POST",
+      CURLOPT_POSTFIELDS => $data_string2,
+      CURLOPT_HTTPHEADER => array(
+        "authorization: Bearer " . $tokent,
+        "content-type: application/json"
+      ),
+    ));
+
+    $response = curl_exec($curl);
+    $err = curl_error($curl);
+
+    curl_close($curl);
+
+    if ($err) {
+      echo "cURL Error #:" . $err;
+    } else {
+      //echo $response;
+      $character = json_decode($response);
+      $shorturl=$character->shortUrl;
+
+
+      $form['#action'] = $shorturl;
+      //dsm($form);
+      $form['submit'] = array(
+          '#type' => 'submit',
+          '#value' => t('Proceed to Tropipay'),
+        );
+
+    }
+
+
+
+
+
+
+
+
+  }
+
+
+
+
+
+/*
+  // Build the data array that will be translated into hidden form values.
+  $data = array(
+		'Ds_Merchant_Amount' => $ds_merchant_amount,
+		'Ds_Merchant_Currency' => $ds_merchant_currency,
+		'Ds_Merchant_Order' => $ds_merchant_order,
+		'Ds_Merchant_ProductDescription' => $ds_merchant_productdescription,
+		'Ds_Merchant_Titular' => $ds_merchant_titular,
+		'Ds_Merchant_MerchantCode' => $ds_merchant_code,
+		'Ds_Merchant_MerchantName' => utf8_decode($settings['MerchantName_tropipay']),
+		'Ds_Merchant_UrlOK' => $ds_merchant_urlok,
+		'Ds_Merchant_UrlKO' => $ds_merchant_urlko,
+		'Ds_Merchant_ConsumerLanguage' => $ds_merchant_consumerlanguage,
+		'Ds_Merchant_Terminal' => $ds_merchant_terminal,
+		'Ds_Merchant_MerchantData' => $ds_merchant_data,
+		'Ds_Merchant_TransactionType' => $ds_merchant_transactiontype,
+		'Ds_Merchant_PayMethods' => 'C',
+		'Ds_Merchant_MerchantURL' => $ds_merchant_merchanturl
+	);
+
+  // Allow modules to alter parameters of the API request.
+  drupal_alter('tropipay_payments_order_form_data', $data, $order);
+  if (!class_exists("TropipayAPI")) {
+    require_once(TROPIPAY_FILE_PATH);
+  }
+  $tropipay                         = new TropipayAPI;
+  $tropipay->setParameters($data);
+  $tropipay->setParameter("Ds_Merchant_Module", 'ZhenIT Software');
+
+  $data = array(
+    'Ds_SignatureVersion'  => "HMAC_SHA256_V1",
+    'Ds_MerchantParameters' => $tropipay->createMerchantParameters(),
+    'Ds_Signature' => $tropipay->createMerchantSignature(tropipay_payments_clave($settings)),
+  );
+
+  $form['#action'] = tropipay_payments_server_url($settings['server']);
+  //dsm($form);
+
+  foreach ($data as $name => $value) {
+    if (!empty($value)) {
+      $form[$name] = array('#type' => 'hidden', '#value' => $value);
+    }
+  }
+//dsm($form);
+ $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Proceed to Tropipay'),
+  );*/
+
+  return $form;
+}
+
+/**
+ * Returns the URL to the specified Redsýs server.
+ *
+ * @param $server
+ *
+ * @return
+ *   The URL to use to submit requests to the Redsýs server.
+ */
+function tropipay_payments_server_url($server) {
+  switch ($server) {
+    case 'live':
+      return 'https://www.tropipay.com';
+    case 'sandbox':
+      return 'https://tropipay-dev.herokuapp.com';
+  }
+}
+
+
+/**
+ * Returns an array of all possible currency codes.
+ */
+function tropipay_payments_currencies() {
+  return drupal_map_assoc(array('EUR', 'GBP', 'USD','CNY','JPY'));
+}
